@@ -2,19 +2,17 @@ from flask import Flask, render_template_string, request, jsonify, session, redi
 import os
 import random
 import string
-from datetime import datetime, timedelta
+from datetime import datetime
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'chave_secreta_super_segura')
 
-# Armazenamento em memória para códigos e relatórios
-CODIGOS_ATIVOS = {}  # { '2PKYVT': {'status': 'Aguardando launcher', 'expira': datetime, 'dados': None} }
+CODIGOS_ATIVOS = {}
 RELATORIOS_SALVOS = []
 
 STAFF_USER = os.environ.get('STAFF_USER', 'admin')
 STAFF_PASS = os.environ.get('STAFF_PASS', 'sua_senha_segura')
 
-# Layout HTML inspirado no LM Viewer
 HTML_PAINEL = """
 <!DOCTYPE html>
 <html lang="pt-BR">
@@ -44,6 +42,8 @@ HTML_PAINEL = """
         th, td { padding: 12px 15px; text-align: left; font-size: 13px; border-bottom: 1px solid #2a2a2a; }
         th { background: #1f1f1f; color: #aaa; }
         tr:hover { background: #1c1c1c; }
+        a.detalhe-link { color: #ff5555; text-decoration: none; font-weight: bold; }
+        a.detalhe-link:hover { text-decoration: underline; }
     </style>
 </head>
 <body>
@@ -57,10 +57,7 @@ HTML_PAINEL = """
     </header>
 
     <div class="tabs">
-        <div class="tab active">Gerar Código</div>
-        <div class="tab">Arquivos Suspeitos</div>
-        <div class="tab">EXEs Executados</div>
-        <div class="tab">Histórico de Modificações</div>
+        <a href="/dashboard" class="tab active">Painel Principal</a>
     </div>
 
     <div class="container">
@@ -76,14 +73,14 @@ HTML_PAINEL = """
         </div>
         {% endif %}
 
-        <h3 style="margin-top: 40px; color: #aaa; font-size: 14px; text-transform: uppercase;">Códigos Recentes / Relatórios</h3>
+        <h3 style="margin-top: 40px; color: #aaa; font-size: 14px; text-transform: uppercase;">Relatórios de Inspeção</h3>
         <table>
             <thead>
                 <tr>
                     <th>Código / Jogador</th>
                     <th>Gerado em</th>
                     <th>Status</th>
-                    <th>Anomalias / Detalhes</th>
+                    <th>Anomalias / Ação</th>
                 </tr>
             </thead>
             <tbody>
@@ -97,10 +94,9 @@ HTML_PAINEL = """
                     <td><span style="color: {% if h.status == 'Concluído' %}#2ecc71{% else %}#f39c12{% endif %};">{{ h.status }}</span></td>
                     <td>
                         {% if h.dados and h.dados.anomalias %}
-                            <b style="color: #ff5555;">{{ h.dados.anomalias|length }} anomalias no GTA</b> | 
-                            <b style="color: #ff9999;">{{ h.dados.executaveis|length }} EXEs no PC</b>
+                            <a href="/detalhes/{{ h.codigo }}" class="detalhe-link">🔍 Ver {{ h.dados.anomalias|length }} anomalias no GTA e {{ h.dados.executaveis|length }} EXEs</a>
                         {% else %}
-                            Aguardando envio...
+                            <span style="color: #f39c12;">Aguardando envio...</span>
                         {% endif %}
                     </td>
                 </tr>
@@ -109,6 +105,58 @@ HTML_PAINEL = """
         </table>
     </div>
 
+</body>
+</html>
+"""
+
+HTML_DETALHES = """
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <title>Detalhes do Relatório - {{ relatorio.codigo }}</title>
+    <style>
+        body { background-color: #121212; color: #e0e0e0; font-family: Arial, sans-serif; margin: 0; padding: 30px; }
+        h2 { color: #ff3b3b; }
+        .box { background: #1a1a1a; padding: 20px; border-radius: 6px; border: 1px solid #2a2a2a; margin-bottom: 20px; }
+        table { width: 100%; border-collapse: collapse; margin-top: 10px; background: #181818; }
+        th, td { padding: 10px; text-align: left; font-size: 12px; border-bottom: 1px solid #2a2a2a; }
+        th { background: #1f1f1f; color: #aaa; }
+        a { color: #ff3b3b; text-decoration: none; font-weight: bold; }
+        a:hover { text-decoration: underline; }
+    </style>
+</head>
+<body>
+    <a href="/dashboard">← Voltar ao Painel</a>
+    <h2>Relatório de Inspeção: {{ relatorio.nickname }} (Código: {{ relatorio.codigo }})</h2>
+    <p><b>Computador:</b> {{ relatorio.dados.computador }} | <b>Data:</b> {{ relatorio.gerado_em }}</p>
+
+    <div class="box">
+        <h3>Modificações e Plugins encontrados na pasta do GTA ({{ relatorio.dados.anomalias|length }})</h3>
+        <table>
+            <tr><th>Arquivo</th><th>Tipo</th><th>Modificado em</th></tr>
+            {% for a in relatorio.dados.anomalias %}
+            <tr>
+                <td>{{ a.arquivo }}</td>
+                <td style="color: #ff5555;">{{ a.tipo }}</td>
+                <td>{{ a.modificado_em }}</td>
+            </tr>
+            {% endfor %}
+        </table>
+    </div>
+
+    <div class="box">
+        <h3>Executáveis e Rastros recentes no PC do Jogador ({{ relatorio.dados.executaveis|length }})</h3>
+        <table>
+            <tr><th>Caminho do Arquivo</th><th>Modificado em</th></tr>
+            {% for e in relatorio.dados.executaveis %}
+            <tr>
+                <td>{{ e.caminho }}</td>
+                <td>{{ e.modificado_em }}</td>
+            </tr>
+            {% endfor %}
+        </table>
+    </div>
 </body>
 </html>
 """
@@ -154,55 +202,42 @@ def logout():
 def dashboard():
     if 'user' not in session:
         return redirect(url_for('index'))
-    
     codigo_atual = session.get('ultimo_codigo')
     return render_template_string(HTML_PAINEL, user=session['user'], codigo_atual=codigo_atual, historico=RELATORIOS_SALVOS)
+
+@app.route('/detalhes/<codigo>')
+def detalhes(codigo):
+    if 'user' not in session:
+        return redirect(url_for('index'))
+    relatorio = next((r for r in RELATORIOS_SALVOS if r['codigo'] == codigo), None)
+    if not relatorio:
+        return "Relatório não encontrado! <a href='/dashboard'>Voltar</a>"
+    return render_template_string(HTML_DETALHES, relatorio=relatorio)
 
 @app.route('/gerar-codigo', methods=['POST'])
 def gerar_codigo():
     if 'user' not in session:
         return redirect(url_for('index'))
-    
-    # Gera um código aleatório de 6 caracteres igual ao print
     codigo = ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
-    
-    CODIGOS_ATIVOS[codigo] = {
-        'status': 'Aguardando launcher',
-        'gerado_em': datetime.now().strftime('%d/%m/%Y, %H:%M:%S'),
-        'dados': None
-    }
-    
-    RELATORIOS_SALVOS.insert(0, {
-        'codigo': codigo,
-        'gerado_em': datetime.now().strftime('%d/%m/%Y, %H:%M:%S'),
-        'status': 'Aguardando launcher',
-        'dados': None,
-        'nickname': ''
-    })
-    
+    CODIGOS_ATIVOS[codigo] = {'status': 'Aguardando launcher', 'gerado_em': datetime.now().strftime('%d/%m/%Y, %H:%M:%S'), 'dados': None}
+    RELATORIOS_SALVOS.insert(0, {'codigo': codigo, 'gerado_em': datetime.now().strftime('%d/%m/%Y, %H:%M:%S'), 'status': 'Aguardando launcher', 'dados': None, 'nickname': ''})
     session['ultimo_codigo'] = codigo
     return redirect(url_for('dashboard'))
 
-# API chamada pelo Launcher/Scanner do Jogador informando o Código gerado
 @app.route('/api/enviar_scan', methods=['POST'])
 def receber_scan():
     dados = request.json
     codigo = dados.get('codigo')
-    
     if not codigo or codigo not in CODIGOS_ATIVOS:
-        return jsonify({'erro': 'Código de acesso inválido ou expirado'}), 400
-    
-    # Atualiza os dados do relatório com o scan do player
+        return jsonify({'erro': 'Código inválido'}), 400
     CODIGOS_ATIVOS[codigo]['status'] = 'Concluído'
     CODIGOS_ATIVOS[codigo]['dados'] = dados
-    
     for r in RELATORIOS_SALVOS:
         if r['codigo'] == codigo:
             r['status'] = 'Concluído'
             r['nickname'] = dados.get('nickname', 'Desconhecido')
             r['dados'] = dados
-            
-    return jsonify({'status': 'sucesso', 'mensagem': 'Relatório processado com sucesso!'})
+    return jsonify({'status': 'sucesso'})
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
